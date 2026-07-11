@@ -141,7 +141,7 @@ The app code in this repository is released under the MIT License. See `LICENSE`
 Escape from Tarkov and related names/assets belong to Battlestate Games. This is an unofficial fan tool and is not affiliated with Battlestate Games, TarkovTracker, tarkov.dev, Fandom, or Reddit.
 
 
-## v26 changes
+## v0.2.6 changes
 
 - Flea Prices is now the second sidebar tab.
 - The duplicate Keys tab was removed; key ownership, needed/missing status, lock locations and wiki sync now live under **Keys / Locker**.
@@ -150,7 +150,7 @@ Escape from Tarkov and related names/assets belong to Battlestate Games. This is
 - The real item catalogue is pulled from tarkov.dev GraphQL data and cached locally in IndexedDB.
 
 
-### v27 note
+### v0.2.7 note
 
 The duplicate old **Keys** tab was removed from normal navigation in v26. In v27, the wiki key sync controls have been moved into the kept **Keys / Locker** page:
 

@@ -1,0 +1,13 @@
+# OS/editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Optional local-only saves/backups
+*.bak
+*.tmp
+local-save*.json
+
+# Keep map assets optional; remove this ignore if you want to commit maps.
+# assets/maps/

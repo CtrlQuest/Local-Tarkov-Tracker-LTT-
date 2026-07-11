@@ -7532,7 +7532,7 @@ try {
 
 /* ===== v29 Stash Scanner: OCR short-name matching + review import ===== */
 (function(){
-  const BUILD = 'v0.3.4-stash-scanner-ocr-label-fix';
+  const BUILD = 'v0.3.6';
   const TESSERACT_CDN = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
   const PAGE_ORDER = ['dashboard','flea','stash','stashscanner','raid','needed','allitems','maps','keylocker','hideout','tasks','gearlocker','weaponrack','medcabinet','story','custom','data','about'];
   const esc = (str) => String(str ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -8293,8 +8293,8 @@ Duct tape x3"></textarea>
     const foot = sidebar.querySelector('.sidebar-foot'); let anchor = foot || null;
     [...PAGE_ORDER].reverse().forEach(page => { const tab = sidebar.querySelector(`.tab[data-page="${page}"]`); if (tab) { sidebar.insertBefore(tab, anchor); anchor = tab; } });
     PAGE_ORDER.forEach((page, idx) => { const tab = sidebar.querySelector(`.tab[data-page="${page}"]`); if (tab) tab.dataset.num = String(idx+1).padStart(2,'0'); });
-    const build = document.querySelector('.sidebar-foot .foot-row:last-child b'); if (build) build.textContent = 'v0.3.4';
-    const subtitle = document.querySelector('.topbar-sub'); if (subtitle) subtitle.textContent = 'Offline raid, stash, scanner, market & locker tracker // v0.3.4';
+    const build = document.querySelector('.sidebar-foot .foot-row:last-child b'); if (build) build.textContent = 'v0.3.6';
+    const subtitle = document.querySelector('.topbar-sub'); if (subtitle) subtitle.textContent = 'Offline raid, stash, scanner, market & locker tracker // v0.3.6';
   }
 
   function switchPageV29(id){
@@ -8330,4 +8330,1243 @@ Duct tape x3"></textarea>
   document.head.appendChild(css);
 
   try { ensureV29(); ensureScannerPage(); addSidebarTabV29(); console.info(`${BUILD} loaded.`); } catch(err){ console.warn('v29 setup warning', err); }
+})();
+
+/* ===== v0.3.5 FIR / buyable requirement badges =====
+   - Needed Items item-use lookup now shows whether each remaining use needs Found in Raid or can be bought.
+   - Mission/task requirements use TaskObjectiveItem.foundInRaid.
+   - Hideout requirements keep attributes when synced and default to buyable unless the API marks the requirement as FIR.
+   - Progress-aware: built hideout levels and completed tasks/objectives are ignored. */
+(function(){
+  const BUILD035 = 'v0.3.6';
+  const $035 = id => document.getElementById(id);
+  const arr = v => Array.isArray(v) ? v : [];
+  const num = (v, d=0) => Number.isFinite(Number(v)) ? Number(v) : d;
+  const esc = v => String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const key = v => String(v || '').toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');
+  const norm = v => key(v).replace(/\b(the|a|an|of|for|with|and)\b/g,' ').replace(/\s+/g,' ').trim();
+  const isDoneText = v => ['done','complete','completed','true'].includes(String(v || '').toLowerCase());
+  let reqCacheKey035 = '';
+  let reqCache035 = null;
+
+  function notify035(msg){ try { if (typeof toast === 'function') toast(msg); else console.log(msg); } catch { console.log(msg); } }
+  function persist035(){
+    try { if (typeof safePersistState === 'function') safePersistState(); else if (typeof saveState === 'function') saveState(); else localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch(err){ console.warn('v0.3.5 save warning', err); }
+  }
+
+  function compactRef035(x) {
+    if (!x) return null;
+    return { id:x.id || undefined, name:x.name || undefined, normalizedName:x.normalizedName || undefined, shortName:x.shortName || undefined, wikiLink:x.wikiLink || undefined, iconLink:x.iconLink || undefined };
+  }
+  function compactReq035(r){
+    const attrs = arr(r?.attributes).map(a => ({ name:a?.name || '', value:a?.value ?? '' })).filter(a => a.name || a.value !== '');
+    return {
+      id:r?.id,
+      count:r?.count || r?.quantity || 1,
+      quantity:r?.quantity,
+      item:compactRef035(r?.item),
+      attributes:attrs,
+      foundInRaid: requirementNeedsFir035({ ...(r || {}), attributes:attrs })
+    };
+  }
+  function compactHideoutStation035(s){
+    if (!s) return null;
+    return {
+      id:s.id, name:s.name, normalizedName:s.normalizedName,
+      levels: arr(s.levels).map(l => ({
+        id:l.id, level:l.level, constructionTime:l.constructionTime, description:l.description,
+        itemRequirements:arr(l.itemRequirements).map(compactReq035).filter(r => r.item?.name),
+        stationLevelRequirements:arr(l.stationLevelRequirements).map(r => ({ id:r.id, level:r.level, station:compactRef035(r.station) })),
+        skillRequirements:arr(l.skillRequirements).map(r => ({ id:r.id, name:r.name, level:r.level, skill:compactRef035(r.skill) })),
+        traderRequirements:arr(l.traderRequirements).map(r => ({ id:r.id, value:r.value, requirementType:r.requirementType, compareMethod:r.compareMethod, trader:compactRef035(r.trader) }))
+      }))
+    };
+  }
+
+  // Replace the compact hideout serializer used by future syncs, without changing the UI files.
+  try {
+    window.compactHideoutForStorage = compactHideoutForStorage = compactHideoutStation035;
+  } catch {}
+
+  function requirementNeedsFir035(req){
+    if (!req) return false;
+    if (req.foundInRaid === true || req.fir === true || req.requiresFoundInRaid === true || req.requireFoundInRaid === true) return true;
+    const attrs = arr(req.attributes).map(a => `${a?.name || ''} ${a?.value ?? ''}`).join(' ').toLowerCase();
+    if (/found\s*in\s*raid|foundinraid|\bfir\b/.test(attrs) && !/(false|no|0)\b/.test(attrs)) return true;
+    // Some cached/exported data may store the flag directly as JSON text.
+    const raw = JSON.stringify({ foundInRaid:req.foundInRaid, fir:req.fir, requiresFoundInRaid:req.requiresFoundInRaid, attributes:req.attributes || [] }).toLowerCase();
+    return /found\s*in\s*raid|foundinraid|\bfir\b/.test(raw) && !/(false|no|0)\b/.test(raw);
+  }
+  function reqMode035(reqOrUse){ return (reqOrUse?.fir || reqOrUse?.foundInRaid || requirementNeedsFir035(reqOrUse)) ? 'FIR' : 'Buyable'; }
+
+  function isRealItem035(item){
+    const name = String(item?.name || item?.shortName || '').trim();
+    if (!name || name.length < 2) return false;
+    const k = key(name);
+    if (!k || /^(item|items|any item|any items|quest item|optional item|unknown item)$/i.test(name)) return false;
+    if (/^(first in line|building foundations|key partner|half empty|sell any items|mission requirements)$/i.test(name)) return false;
+    return true;
+  }
+  function objectiveText035(o){ return `${o?.description || ''} ${o?.type || ''}`.toLowerCase(); }
+  function broadObjective035(o){
+    const d = objectiveText035(o);
+    return /\b(any items?|all items?|category|barter items?|valuable items?|electronic items?|military electronic items?|medical items?|provisions|sell items?|sell any|hand over.*any)\b/.test(d);
+  }
+  function itemMentioned035(o, item){
+    const d = objectiveText035(o);
+    if (!d) return true;
+    const names = [item?.name, item?.shortName, item?.normalizedName].filter(Boolean).map(norm).filter(v => v.length >= 2);
+    return names.some(n => d.includes(n) || d.includes(`${n}s`) || (n.endsWith('s') && d.includes(n.slice(0,-1))));
+  }
+  function objectiveItems035(o){
+    const raw = [];
+    arr(o?.items).forEach(i => raw.push(i));
+    if (o?.item) raw.push(o.item);
+    if (o?.markerItem) raw.push(o.markerItem);
+    const real = raw.filter(isRealItem035);
+    if (!real.length) return [];
+    const explicit = real.filter(i => itemMentioned035(o, i));
+    if (real.length > 1 && !explicit.length) return [];
+    if (real.length === 1 && broadObjective035(o) && !explicit.length) return [];
+    return (explicit.length ? explicit : real).map(i => ({
+      ...i,
+      count:num(i.count || o.count, 1),
+      foundInRaid:!!(i.foundInRaid || o.foundInRaid || /\b(found\s*in\s*raid|find.*in raid|\bfir\b)\b/i.test(o?.description || ''))
+    }));
+  }
+
+  function stationId035(st){ return st?.id || st?.normalizedName || key(st?.name); }
+  function hideoutCurrentLevel035(st){
+    const candidates = [stationId035(st), st?.id, st?.normalizedName, st?.name, key(st?.name)].filter(Boolean);
+    for (const c of candidates) if (Object.prototype.hasOwnProperty.call(state.hideoutProgress || {}, c)) return num(state.hideoutProgress[c], 0);
+    return 0;
+  }
+  function hideoutLevels035(st){ return arr(st?.levels).slice().sort((a,b)=>num(a.level)-num(b.level)); }
+  function hideoutReqItems035(level){
+    return arr(level?.itemRequirements).map(r => ({
+      id:r?.item?.id || r?.id,
+      name:r?.item?.name || r?.name || r?.itemName,
+      shortName:r?.item?.shortName || r?.shortName,
+      wikiLink:r?.item?.wikiLink,
+      iconLink:r?.item?.iconLink,
+      count:num(r?.count || r?.quantity, 1),
+      attributes:r?.attributes || [],
+      foundInRaid:requirementNeedsFir035(r)
+    })).filter(isRealItem035);
+  }
+  function taskDone035(task){ return isDoneText(state.missionProgress?.[task?.id]); }
+  function objectiveDone035(task, obj, idx){
+    try {
+      if (typeof objectiveKey === 'function') {
+        if (state.taskObjectives?.[objectiveKey(task.id, obj.id || String(idx))]) return true;
+        if (obj.id && state.taskObjectives?.[objectiveKey(task.id, obj.id)]) return true;
+      }
+    } catch {}
+    return !!state.taskObjectives?.[`${task?.id}::${obj?.id || idx}`];
+  }
+  function trackedHave035(itemName){
+    const q = key(itemName);
+    return arr(state.items).reduce((sum, i) => key(i.name) === q ? sum + num(i.found,0) : sum, 0);
+  }
+
+  function addUse035(index, name, qty, use){
+    if (!name || !isRealItem035({name})) return;
+    const k = key(name); if (!k) return;
+    const entry = index.get(k) || { key:k, name, hideout:0, missions:0, fir:0, buyable:0, uses:[] };
+    const count = Math.max(1, num(qty,1));
+    if (use.type === 'hideout') entry.hideout += count;
+    if (use.type === 'mission') entry.missions += count;
+    if (use.fir) entry.fir += count; else entry.buyable += count;
+    entry.uses.push({ ...use, qty:count, mode:use.fir ? 'FIR' : 'Buyable' });
+    index.set(k, entry);
+  }
+  function cacheKey035(){
+    return JSON.stringify({
+      sync:state.apiCache?.syncedAt || '',
+      h:arr(state.apiCache?.hideout).length,
+      t:arr(state.apiCache?.tasks).length,
+      hp:state.hideoutProgress || {},
+      mp:state.missionProgress || {},
+      to:state.taskObjectives || {},
+      found:arr(state.items).map(i => [key(i.name), num(i.found,0)])
+    });
+  }
+  function buildRequirementIndex035(){
+    const ck = cacheKey035();
+    if (reqCache035 && reqCacheKey035 === ck) return reqCache035;
+    const index = new Map();
+    arr(state.apiCache?.hideout).forEach(st => {
+      const current = hideoutCurrentLevel035(st);
+      hideoutLevels035(st).forEach(level => {
+        const lvl = num(level?.level,0);
+        if (!lvl || lvl <= current) return;
+        hideoutReqItems035(level).forEach(req => addUse035(index, req.name || req.shortName, req.count, {
+          type:'hideout', station:st?.name || 'Hideout station', level:lvl, fir:!!req.foundInRaid,
+          note:`${st?.name || 'Hideout'} level ${lvl}`
+        }));
+      });
+    });
+    arr(state.apiCache?.tasks).forEach(task => {
+      if (!task || taskDone035(task)) return;
+      const perTask = new Map();
+      arr(task.objectives).forEach((o, idx) => {
+        if (objectiveDone035(task, o, idx)) return;
+        objectiveItems035(o).forEach(item => {
+          const k = key(item.name || item.shortName); if (!k) return;
+          const old = perTask.get(k) || { name:item.name || item.shortName, count:0, foundInRaid:false, notes:[] };
+          old.count = Math.max(num(old.count,0), num(item.count || o.count,1));
+          old.foundInRaid = old.foundInRaid || !!item.foundInRaid;
+          const note = String(o.description || o.type || '').trim();
+          if (note && !old.notes.includes(note)) old.notes.push(note);
+          perTask.set(k, old);
+        });
+      });
+      perTask.forEach(item => addUse035(index, item.name, item.count, {
+        type:'mission', mission:task.name || 'Mission/task', trader:task.trader?.name || '', fir:!!item.foundInRaid,
+        note:item.notes.slice(0,2).join(' / ')
+      }));
+    });
+    reqCacheKey035 = ck;
+    reqCache035 = index;
+    window.lttRequirementIndex = index;
+    return index;
+  }
+  function itemUsage035(itemName){
+    const idx = buildRequirementIndex035();
+    const q = key(itemName);
+    let entry = idx.get(q);
+    if (!entry) {
+      const qn = norm(itemName);
+      for (const e of idx.values()) {
+        const en = norm(e.name);
+        if (en === qn || (qn.length >= 3 && (en.includes(qn) || qn.includes(en)))) { entry = e; break; }
+      }
+    }
+    entry = entry || { key:q, name:itemName, hideout:0, missions:0, fir:0, buyable:0, uses:[] };
+    const total = num(entry.hideout,0) + num(entry.missions,0);
+    const have = trackedHave035(entry.name || itemName);
+    return { ...entry, total, have, still:Math.max(0,total-have) };
+  }
+  window.lttItemUsage = itemUsage035;
+
+  function renderUsePanel035(searchText){
+    const list = $035('itemList'); if (!list) return;
+    let panel = $035('v035ItemUsePanel') || $035('v20ItemUsePanel') || $035('v15ItemUsePanel');
+    if (!panel) { panel = document.createElement('div'); panel.id = 'v035ItemUsePanel'; panel.className = 'panel readable'; list.parentNode.insertBefore(panel, list); }
+    panel.id = 'v035ItemUsePanel';
+    const q = String(searchText || '').trim();
+    if (!q) { panel.style.display='none'; panel.innerHTML=''; return; }
+    const summary = itemUsage035(q);
+    const uses = arr(summary.uses);
+    const useList = uses.slice(0, 24).map(u => {
+      const title = u.type === 'hideout' ? `Hideout: ${u.station || 'Station'} level ${u.level || ''}`.trim() : `Mission: ${u.mission || 'Task'}${u.trader ? ` / ${u.trader}` : ''}`;
+      const badge = u.fir ? '<span class="badge cyan">Found in raid required</span>' : '<span class="badge green">Can buy / no FIR</span>';
+      return `<li><strong>${esc(u.qty)}×</strong> ${esc(title)} ${badge}${u.note ? `<br><small class="meta">${esc(u.note)}</small>` : ''}</li>`;
+    }).join('');
+    const otherMatches = [...buildRequirementIndex035().values()].map(e => e.name).filter(n => n && norm(n).includes(norm(q)) && key(n) !== key(summary.name)).slice(0, 7);
+    panel.style.display='';
+    panel.innerHTML = `
+      <h2>Item use lookup: ${esc(summary.name || q)}</h2>
+      <p>Progress-aware count. Built hideout levels and completed tasks/objectives are ignored. Each use now shows whether it must be <strong>Found in Raid</strong> or whether it can be bought/found normally.</p>
+      <div class="stats">
+        <div class="stat"><strong>${esc(summary.still)}</strong><span>Still need</span></div>
+        <div class="stat"><strong>${esc(summary.total)}</strong><span>Total remaining</span></div>
+        <div class="stat"><strong>${esc(summary.fir || 0)}</strong><span>FIR required</span></div>
+        <div class="stat"><strong>${esc(summary.buyable || 0)}</strong><span>Can buy / normal</span></div>
+        <div class="stat"><strong>${esc(summary.hideout || 0)}</strong><span>Hideout left</span></div>
+        <div class="stat"><strong>${esc(summary.missions || 0)}</strong><span>Missions left</span></div>
+        <div class="stat"><strong>${esc(summary.have)}</strong><span>Tracker says have</span></div>
+      </div>
+      ${uses.length ? `<h3>Where this is still used</h3><ul>${useList}</ul>${uses.length > 24 ? `<p class="meta">+ ${uses.length - 24} more uses.</p>` : ''}` : `<p>No synced hideout/task usage found for <strong>${esc(q)}</strong>. Try the full item name or sync Tarkov data.</p>`}
+      ${otherMatches.length ? `<p class="meta">Other matching items: ${otherMatches.map(n => `<button class="small ghost" type="button" onclick="document.getElementById('searchInput').value='${esc(n).replace(/'/g, '&#39;')}'; render();">${esc(n)}</button>`).join(' ')}</p>` : ''}
+    `;
+  }
+
+  const oldRenderItems035 = (typeof renderItems === 'function') ? renderItems : null;
+  window.renderItems = renderItems = function renderItemsV035(){
+    const search = String($035('searchInput')?.value || '').trim().toLowerCase();
+    const filter = $035('filterSelect')?.value || 'all';
+    const list = $035('itemList');
+    const template = $035('itemTemplate');
+    if (!list || !template) return oldRenderItems035 && oldRenderItems035();
+    renderUsePanel035(search);
+    const filtered = arr(state.items).filter(item => {
+      const text = `${item?.name || ''} ${item?.source || ''} ${item?.note || ''}`.toLowerCase();
+      const matchesSearch = !search || text.includes(search);
+      const isTracked = arr(state.tracked).includes(item.id);
+      const unfinished = num(item?.found,0) < num(item?.needed,0);
+      const matchesFilter = filter === 'all' || (filter === 'tracked' && isTracked) || (filter === 'unfinished' && unfinished) || item?.source === filter;
+      return matchesSearch && matchesFilter;
+    });
+    list.innerHTML = '';
+    if (!filtered.length) {
+      list.innerHTML = `<div class="panel"><p>Needed Items is manual only. Search in <strong>All Items Lookup</strong> and press Track needed, or add an item from Custom Track.</p></div>`;
+      return;
+    }
+    const maxCards = search ? 80 : 160;
+    filtered.slice(0, maxCards).forEach(item => {
+      const clone = template.content.cloneNode(true);
+      const isTracked = arr(state.tracked).includes(item.id);
+      const progress = (typeof itemProgress === 'function') ? itemProgress(item) : num(item.found,0);
+      const percent = item.needed ? (progress / item.needed) * 100 : 0;
+      const usage = itemUsage035(item.name);
+      clone.querySelector('.name').textContent = item.name;
+      const meta = clone.querySelector('.meta');
+      if (meta) {
+        const extra = usage.total ? `<br><span class="badge cyan">${esc(usage.fir || 0)} FIR</span> <span class="badge green">${esc(usage.buyable || 0)} buy/normal</span>` : '';
+        meta.innerHTML = `${esc(item.note || 'No note')}${extra}`;
+      }
+      clone.querySelector('.pill').textContent = item.source || 'custom';
+      clone.querySelector('.progress-text').textContent = `${progress} / ${item.needed} collected`;
+      clone.querySelector('.bar span').style.width = `${Math.min(100, percent)}%`;
+      const trackBtn = clone.querySelector('.trackBtn');
+      trackBtn.textContent = isTracked ? 'Untrack' : 'Track';
+      trackBtn.onclick = () => toggleTrack(item.id);
+      clone.querySelector('.minusBtn').onclick = () => adjustFound(item.id, -1);
+      clone.querySelector('.plusBtn').onclick = () => adjustFound(item.id, 1);
+      clone.querySelector('.foundBtn').onclick = () => addRaidFound(item.id);
+      clone.querySelector('.deleteBtn').onclick = () => deleteItem(item.id);
+      list.appendChild(clone);
+    });
+  };
+
+  async function syncHideoutRequirementFlags035(){
+    if (typeof gql !== 'function') return;
+    try {
+      const data = await gql(`query LttHideoutRequirementFlags($lang: LanguageCode) {
+        hideoutStations(lang: $lang) {
+          id name normalizedName
+          levels {
+            id level constructionTime description
+            itemRequirements { id count quantity attributes { name value } item { id name normalizedName shortName iconLink wikiLink } }
+            stationLevelRequirements { id level station { id name normalizedName } }
+            skillRequirements { id name level skill { id name } }
+            traderRequirements { id value requirementType compareMethod trader { id name normalizedName } }
+          }
+        }
+      }`, { lang:'en' }, { allowPartial:true });
+      const hideout = arr(data?.hideoutStations).map(compactHideoutStation035).filter(Boolean);
+      if (hideout.length) {
+        state.apiCache.hideout = hideout;
+        state.apiCache.source = `${state.apiCache.source || 'tarkov.dev GraphQL API'} • hideout FIR/buy flags`;
+        state.apiCache.syncedAt = state.apiCache.syncedAt || new Date().toISOString();
+        reqCacheKey035 = ''; reqCache035 = null;
+        try { if (typeof persistReferenceCacheV13 === 'function') await persistReferenceCacheV13(); } catch(err){ console.warn('v0.3.5 IDB hideout flags save warning', err); }
+        persist035();
+      }
+    } catch(err) {
+      console.warn('v0.3.5 hideout FIR/buy flag sync skipped', err?.message || err);
+      const status = $035('syncStatus');
+      if (status) status.insertAdjacentHTML('beforeend', `<p class="meta">Hideout FIR/buy flag refresh skipped: ${esc(err.message || err)}</p>`);
+    }
+  }
+  window.lttSyncHideoutRequirementFlags = syncHideoutRequirementFlags035;
+
+  const prevSync035 = (typeof syncTarkovData === 'function') ? syncTarkovData : null;
+  if (prevSync035 && !prevSync035.__v035FirBuy) {
+    const patched = async function syncTarkovDataV035(){
+      await prevSync035();
+      await syncHideoutRequirementFlags035();
+      try { render(); } catch {}
+    };
+    patched.__v035FirBuy = true;
+    syncTarkovData = patched;
+  }
+
+  function applyVersion035(){
+    const build = document.querySelector('.sidebar-foot .foot-row:last-child b'); if (build) build.textContent = BUILD035;
+    const subtitle = document.querySelector('.topbar-sub'); if (subtitle) subtitle.textContent = `Offline raid, stash, scanner, market & locker tracker // ${BUILD035}`;
+    const status = document.querySelector('.statusbar-center, .footer-credit, .bottom-credit');
+    if (status && !/CtrlQuest/i.test(status.textContent)) status.insertAdjacentHTML('beforeend', ` <span class="hud-sep">/</span> <span class="hud-label">BUILD</span> <span class="hud-val">${BUILD035}</span>`);
+    if ($035('syncBtn')) $035('syncBtn').onclick = syncTarkovData;
+    if ($035('syncBtn2')) $035('syncBtn2').onclick = syncTarkovData;
+  }
+  document.addEventListener('DOMContentLoaded', () => setTimeout(applyVersion035, 150));
+  try { applyVersion035(); console.info(`${BUILD035} loaded: Needed Items now shows FIR vs buyable/normal requirements.`); } catch(err){ console.warn('v0.3.6 init warning', err); }
+})();
+
+/* ===== v0.3.7 FIR vs buyable requirement display fix =====
+   Hideout requirements now default to buyable/normal unless the requirement explicitly says Found in Raid.
+   Needed Items and Hideout requirement lines show the requirement mode clearly. */
+(function(){
+  const BUILD037 = 'v0.3.7';
+  const $ = id => document.getElementById(id);
+  const arr = v => Array.isArray(v) ? v : [];
+  const num = (v, d=0) => Number.isFinite(Number(v)) ? Number(v) : d;
+  const esc = v => String(v ?? '').replace(/[&<>\"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
+  const key = v => String(v || '').toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');
+  const norm = v => key(v).replace(/\b(the|a|an|of|for|with|and|to|in)\b/g,' ').replace(/\s+/g,' ').trim();
+  const doneText = v => ['done','complete','completed','true'].includes(String(v || '').toLowerCase());
+  let cacheKey = '';
+  let cacheIndex = null;
+
+  function persist(){ try { if (typeof safePersistState === 'function') safePersistState(); else if (typeof saveState === 'function') saveState(); } catch(e){ console.warn('v0.3.7 save warning', e); } }
+  function toastMsg(msg){ try { if (typeof toast === 'function') toast(msg); else console.log(msg); } catch { console.log(msg); } }
+
+  function explicitFoundInRaidFlag(req){
+    // Important: absence of a FIR flag/text means buyable/normal.
+    if (!req) return false;
+    if (req.foundInRaid === true || req.fir === true || req.requiresFoundInRaid === true || req.requireFoundInRaid === true || req.requiredFoundInRaid === true) return true;
+    if (req.foundInRaid === false || req.fir === false || req.requiresFoundInRaid === false || req.requireFoundInRaid === false || req.requiredFoundInRaid === false) return false;
+    const attrs = arr(req.attributes).map(a => `${a?.name || ''} ${a?.value ?? ''}`).join(' ').toLowerCase();
+    if (/(found\s*in\s*raid|foundinraid|\bfir\b)/i.test(attrs) && !/(false|no|not|required\s*false|0)\b/i.test(attrs)) return true;
+    const txt = `${req.description || ''} ${req.note || ''} ${req.requirementType || ''}`.toLowerCase();
+    if (/(found\s*in\s*raid|foundinraid|\bfir\b)/i.test(txt) && !/(false|no|not|required\s*false|0)\b/i.test(txt)) return true;
+    return false;
+  }
+  function modeBadge(use){ return use?.fir ? '<span class="badge cyan">Found in raid required</span>' : '<span class="badge green">Can buy / no FIR</span>'; }
+  function modeText(use){ return use?.fir ? 'Found in Raid required' : 'Can buy / no FIR'; }
+
+  function isRealItem(item){
+    const name = String(item?.name || item?.shortName || '').trim();
+    if (!name || name.length < 2) return false;
+    if (/^(item|items|any item|any items|quest item|optional item|unknown item)$/i.test(name)) return false;
+    if (/^(first in line|building foundations|key partner|half empty|sell any items|mission requirements)$/i.test(name)) return false;
+    return true;
+  }
+  function objectiveText(o){ return `${o?.description || ''} ${o?.type || ''}`.toLowerCase(); }
+  function broadObjective(o){
+    const d = objectiveText(o);
+    return /\b(any items?|all items?|category|barter items?|valuable items?|electronic items?|military electronic items?|medical items?|provisions|sell items?|sell any|hand over.*any)\b/i.test(d);
+  }
+  function itemMentioned(o, item){
+    const d = objectiveText(o);
+    if (!d) return true;
+    const names = [item?.name, item?.shortName, item?.normalizedName].filter(Boolean).map(norm).filter(v => v.length >= 2);
+    return names.some(n => d.includes(n) || d.includes(`${n}s`) || (n.endsWith('s') && d.includes(n.slice(0,-1))));
+  }
+  function objectiveItems(o){
+    const raw = [];
+    arr(o?.items).forEach(i => raw.push(i));
+    if (o?.item) raw.push(o.item);
+    const real = raw.filter(isRealItem);
+    if (!real.length) return [];
+    const explicit = real.filter(i => itemMentioned(o, i));
+    if (real.length > 1 && !explicit.length) return [];
+    if (real.length === 1 && broadObjective(o) && !explicit.length) return [];
+    return (explicit.length ? explicit : real).map(i => ({
+      ...i,
+      count:num(i.count || o.count, 1),
+      foundInRaid:!!(i.foundInRaid || o.foundInRaid || /\b(found\s*in\s*raid|find.*in raid|find.*raid|\bfir\b)\b/i.test(o?.description || ''))
+    }));
+  }
+
+  function stationKey(st){ return st?.id || st?.normalizedName || key(st?.name); }
+  function currentHideoutLevel(st){
+    const candidates = [stationKey(st), st?.id, st?.normalizedName, st?.name, key(st?.name)].filter(Boolean);
+    for (const c of candidates) if (Object.prototype.hasOwnProperty.call(state.hideoutProgress || {}, c)) return num(state.hideoutProgress[c], 0);
+    return 0;
+  }
+  function levels(st){ return arr(st?.levels).slice().sort((a,b)=>num(a.level)-num(b.level)); }
+  function hideoutReqs(level){
+    return arr(level?.itemRequirements).map(r => ({
+      id:r?.item?.id || r?.id,
+      name:r?.item?.name || r?.name || r?.itemName,
+      shortName:r?.item?.shortName || r?.shortName,
+      wikiLink:r?.item?.wikiLink,
+      iconLink:r?.item?.iconLink,
+      count:num(r?.count || r?.quantity, 1),
+      attributes:r?.attributes || [],
+      foundInRaid:explicitFoundInRaidFlag(r)
+    })).filter(isRealItem);
+  }
+  function taskDone(task){ return doneText(state.missionProgress?.[task?.id]); }
+  function objectiveDone(task, obj, idx){
+    try {
+      if (typeof objectiveKey === 'function') {
+        if (state.taskObjectives?.[objectiveKey(task.id, obj.id || String(idx))]) return true;
+        if (obj.id && state.taskObjectives?.[objectiveKey(task.id, obj.id)]) return true;
+      }
+    } catch {}
+    return !!state.taskObjectives?.[`${task?.id}::${obj?.id || idx}`];
+  }
+  function trackedHave(itemName){
+    const q = key(itemName);
+    const tracked = arr(state.items).reduce((sum, i) => key(i.name) === q ? sum + num(i.found,0) : sum, 0);
+    const stash = arr(state.stash?.items).reduce((sum, i) => key(i.name) === q ? sum + num(i.qty,0) : sum, 0);
+    return Math.max(tracked, stash);
+  }
+
+  function addUse(index, name, qty, use){
+    if (!name || !isRealItem({name})) return;
+    const k = key(name); if (!k) return;
+    const entry = index.get(k) || { key:k, name, hideout:0, missions:0, fir:0, buyable:0, uses:[] };
+    const count = Math.max(1, num(qty,1));
+    if (use.type === 'hideout') entry.hideout += count;
+    if (use.type === 'mission') entry.missions += count;
+    if (use.fir) entry.fir += count; else entry.buyable += count;
+    entry.uses.push({ ...use, qty:count, mode:use.fir ? 'FIR' : 'Buyable' });
+    index.set(k, entry);
+  }
+  function requirementCacheKey(){
+    return JSON.stringify({
+      sync:state.apiCache?.syncedAt || '',
+      h:arr(state.apiCache?.hideout).length,
+      t:arr(state.apiCache?.tasks).length,
+      hp:state.hideoutProgress || {},
+      mp:state.missionProgress || {},
+      to:state.taskObjectives || {},
+      found:arr(state.items).map(i => [key(i.name), num(i.found,0)]),
+      stash:arr(state.stash?.items).map(i => [key(i.name), num(i.qty,0)])
+    });
+  }
+  function buildRequirementIndex(){
+    const ck = requirementCacheKey();
+    if (cacheIndex && cacheKey === ck) return cacheIndex;
+    const index = new Map();
+
+    arr(state.apiCache?.hideout).forEach(st => {
+      const current = currentHideoutLevel(st);
+      levels(st).forEach(level => {
+        const lvl = num(level?.level,0);
+        if (!lvl || lvl <= current) return;
+        hideoutReqs(level).forEach(req => addUse(index, req.name || req.shortName, req.count, {
+          type:'hideout', station:st?.name || 'Hideout station', level:lvl, fir:!!req.foundInRaid,
+          note:`${st?.name || 'Hideout'} level ${lvl} • ${req.foundInRaid ? 'Found in Raid required' : 'Can buy / no FIR'}`
+        }));
+      });
+    });
+
+    arr(state.apiCache?.tasks).forEach(task => {
+      if (!task || taskDone(task)) return;
+      const perTask = new Map();
+      arr(task.objectives).forEach((o, idx) => {
+        if (objectiveDone(task, o, idx)) return;
+        objectiveItems(o).forEach(item => {
+          const k = key(item.name || item.shortName); if (!k) return;
+          const old = perTask.get(k) || { name:item.name || item.shortName, count:0, foundInRaid:false, notes:[] };
+          old.count = Math.max(num(old.count,0), num(item.count || o.count,1));
+          old.foundInRaid = old.foundInRaid || !!item.foundInRaid;
+          const note = String(o.description || o.type || '').trim();
+          if (note && !old.notes.includes(note)) old.notes.push(note);
+          perTask.set(k, old);
+        });
+      });
+      perTask.forEach(item => addUse(index, item.name, item.count, {
+        type:'mission', mission:task.name || 'Mission/task', trader:task.trader?.name || '', fir:!!item.foundInRaid,
+        note:item.notes.slice(0,2).join(' / ')
+      }));
+    });
+
+    cacheKey = ck;
+    cacheIndex = index;
+    window.lttRequirementIndex = index;
+    return index;
+  }
+  function itemUsage(itemName){
+    const idx = buildRequirementIndex();
+    const q = key(itemName);
+    let entry = idx.get(q);
+    if (!entry) {
+      const qn = norm(itemName);
+      for (const e of idx.values()) {
+        const en = norm(e.name);
+        if (en === qn || (qn.length >= 3 && (en.includes(qn) || qn.includes(en)))) { entry = e; break; }
+      }
+    }
+    entry = entry || { key:q, name:itemName, hideout:0, missions:0, fir:0, buyable:0, uses:[] };
+    const total = num(entry.hideout,0) + num(entry.missions,0);
+    const have = trackedHave(entry.name || itemName);
+    return { ...entry, total, have, still:Math.max(0,total-have) };
+  }
+  window.lttItemUsage = itemUsage;
+
+  function renderUsePanel(searchText){
+    const list = $('itemList'); if (!list) return;
+    let panel = $('v037ItemUsePanel') || $('v035ItemUsePanel') || $('v20ItemUsePanel') || $('v15ItemUsePanel');
+    if (!panel) { panel = document.createElement('div'); panel.id = 'v037ItemUsePanel'; panel.className = 'panel readable'; list.parentNode.insertBefore(panel, list); }
+    panel.id = 'v037ItemUsePanel';
+    const q = String(searchText || '').trim();
+    if (!q) { panel.style.display='none'; panel.innerHTML=''; return; }
+    const summary = itemUsage(q);
+    const uses = arr(summary.uses);
+    const useList = uses.slice(0, 32).map(u => {
+      const title = u.type === 'hideout' ? `Hideout: ${u.station || 'Station'} level ${u.level || ''}`.trim() : `Mission: ${u.mission || 'Task'}${u.trader ? ` / ${u.trader}` : ''}`;
+      return `<li><strong>${esc(u.qty)}×</strong> ${esc(title)} ${modeBadge(u)}${u.note ? `<br><small class="meta">${esc(u.note)}</small>` : ''}</li>`;
+    }).join('');
+    const otherMatches = [...buildRequirementIndex().values()].map(e => e.name).filter(n => n && norm(n).includes(norm(q)) && key(n) !== key(summary.name)).slice(0, 7);
+    panel.style.display='';
+    panel.innerHTML = `
+      <h2>Item use lookup: ${esc(summary.name || q)}</h2>
+      <p>Progress-aware count. Built hideout levels and completed tasks/objectives are ignored. <strong>Hideout items default to Can buy / no FIR</strong> unless the requirement explicitly says Found in Raid.</p>
+      <div class="stats">
+        <div class="stat"><strong>${esc(summary.still)}</strong><span>Still need</span></div>
+        <div class="stat"><strong>${esc(summary.total)}</strong><span>Total remaining</span></div>
+        <div class="stat"><strong>${esc(summary.fir || 0)}</strong><span>FIR required</span></div>
+        <div class="stat"><strong>${esc(summary.buyable || 0)}</strong><span>Can buy / normal</span></div>
+        <div class="stat"><strong>${esc(summary.hideout || 0)}</strong><span>Hideout left</span></div>
+        <div class="stat"><strong>${esc(summary.missions || 0)}</strong><span>Missions left</span></div>
+        <div class="stat"><strong>${esc(summary.have)}</strong><span>Tracker/Stash says have</span></div>
+      </div>
+      ${uses.length ? `<h3>Where this is still used</h3><ul>${useList}</ul>${uses.length > 32 ? `<p class="meta">+ ${uses.length - 32} more uses.</p>` : ''}` : `<p>No synced hideout/task usage found for <strong>${esc(q)}</strong>. Try the full item name or sync Tarkov data.</p>`}
+      ${otherMatches.length ? `<p class="meta">Other matching items: ${otherMatches.map(n => `<button class="small ghost" type="button" onclick="document.getElementById('searchInput').value='${esc(n).replace(/'/g, '&#39;')}'; render();">${esc(n)}</button>`).join(' ')}</p>` : ''}
+    `;
+  }
+
+  const oldRenderItems = (typeof renderItems === 'function') ? renderItems : null;
+  window.renderItems = renderItems = function renderItemsV037(){
+    const search = String($('searchInput')?.value || '').trim().toLowerCase();
+    const filter = $('filterSelect')?.value || 'all';
+    const list = $('itemList');
+    const template = $('itemTemplate');
+    if (!list || !template) return oldRenderItems && oldRenderItems();
+    renderUsePanel(search);
+    const filtered = arr(state.items).filter(item => {
+      const text = `${item?.name || ''} ${item?.source || ''} ${item?.note || ''}`.toLowerCase();
+      const matchesSearch = !search || text.includes(search);
+      const isTracked = arr(state.tracked).includes(item.id);
+      const unfinished = num(item?.found,0) < num(item?.needed,0);
+      const matchesFilter = filter === 'all' || (filter === 'tracked' && isTracked) || (filter === 'unfinished' && unfinished) || item?.source === filter;
+      return matchesSearch && matchesFilter;
+    });
+    list.innerHTML = '';
+    if (!filtered.length) {
+      list.innerHTML = `<div class="panel"><p>Needed Items is manual only. Search in <strong>All Items Lookup</strong> and press Track needed, or add an item from Custom Track.</p></div>`;
+      return;
+    }
+    const maxCards = search ? 80 : 160;
+    filtered.slice(0, maxCards).forEach(item => {
+      const clone = template.content.cloneNode(true);
+      const isTracked = arr(state.tracked).includes(item.id);
+      const progress = (typeof itemProgress === 'function') ? itemProgress(item) : num(item.found,0);
+      const percent = item.needed ? (progress / item.needed) * 100 : 0;
+      const usage = itemUsage(item.name);
+      clone.querySelector('.name').textContent = item.name;
+      const meta = clone.querySelector('.meta');
+      if (meta) {
+        const badges = [];
+        if (usage.total) {
+          if (usage.fir) badges.push(`<span class="badge cyan">${esc(usage.fir)} FIR required</span>`);
+          if (usage.buyable) badges.push(`<span class="badge green">${esc(usage.buyable)} can buy / normal</span>`);
+        }
+        meta.innerHTML = `${esc(item.note || 'No note')}${badges.length ? `<br>${badges.join(' ')}` : ''}`;
+      }
+      clone.querySelector('.pill').textContent = item.source || 'custom';
+      clone.querySelector('.progress-text').textContent = `${progress} / ${item.needed} collected`;
+      clone.querySelector('.bar span').style.width = `${Math.min(100, percent)}%`;
+      const trackBtn = clone.querySelector('.trackBtn');
+      trackBtn.textContent = isTracked ? 'Untrack' : 'Track';
+      trackBtn.onclick = () => toggleTrack(item.id);
+      clone.querySelector('.minusBtn').onclick = () => adjustFound(item.id, -1);
+      clone.querySelector('.plusBtn').onclick = () => adjustFound(item.id, 1);
+      clone.querySelector('.foundBtn').onclick = () => addRaidFound(item.id);
+      clone.querySelector('.deleteBtn').onclick = () => deleteItem(item.id);
+      list.appendChild(clone);
+    });
+  };
+
+  const oldRenderHideoutCard = (typeof renderHideoutCard === 'function') ? renderHideoutCard : null;
+  window.renderHideoutCard = renderHideoutCard = function renderHideoutCardV037(station){
+    const html = oldRenderHideoutCard ? oldRenderHideoutCard(station) : '';
+    if (!html) return html;
+    const cur = currentHideoutLevel(station);
+    const next = levels(station).find(l => num(l.level,0) > cur) || null;
+    if (!next) return html;
+    try {
+      const box = document.createElement('div');
+      box.innerHTML = html;
+      hideoutReqs(next).forEach(req => {
+        const have = trackedHave(req.name || req.shortName);
+        const left = Math.max(0, num(req.count,0) - have);
+        box.querySelectorAll('li').forEach(li => {
+          if (li.textContent && li.textContent.includes(req.name)) {
+            li.innerHTML = `<strong>${esc(req.count)}</strong> ${esc(req.name)} ${modeBadge({fir:req.foundInRaid})}<br><small class="meta">have ${esc(have)} • left ${esc(left)} • ${esc(modeText({fir:req.foundInRaid}))}</small>`;
+          }
+        });
+      });
+      return box.innerHTML;
+    } catch { return html; }
+  };
+
+  function applyVersion(){
+    const build = document.querySelector('.sidebar-foot .foot-row:last-child b'); if (build) build.textContent = BUILD037;
+    const subtitle = document.querySelector('.topbar-sub'); if (subtitle) subtitle.textContent = `Offline raid, stash, scanner, market & locker tracker // ${BUILD037}`;
+    const status = document.querySelector('.statusbar-center, .footer-credit, .bottom-credit');
+    if (status) {
+      const old = status.innerHTML;
+      status.innerHTML = old.replace(/v0\.3\.\d+/g, BUILD037);
+    }
+    if ($('syncBtn')) $('syncBtn').onclick = syncTarkovData;
+    if ($('syncBtn2')) $('syncBtn2').onclick = syncTarkovData;
+  }
+  document.addEventListener('DOMContentLoaded', () => setTimeout(applyVersion, 150));
+  try { applyVersion(); console.info(`${BUILD037} loaded: hideout defaults to buyable/no FIR unless explicitly marked FIR.`); } catch(e){ console.warn('v0.3.7 init warning', e); }
+})();
+
+/* ===== v0.3.8 Requirement mode visibility fix =====
+   Makes FIR vs buyable/normal requirement status visible on Needed Items, Item Lookup,
+   Hideout requirement cards, and exported/tracked hideout items. */
+(function(){
+  const BUILD038 = 'v0.3.8';
+  const $ = id => document.getElementById(id);
+  const arr = v => Array.isArray(v) ? v : [];
+  const num = (v, d=0) => Number.isFinite(Number(v)) ? Number(v) : d;
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const key = v => String(v || '').toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');
+  const norm = v => key(v).replace(/\b(the|a|an|of|for|with|and)\b/g,' ').replace(/\s+/g,' ').trim();
+
+  function notify(msg){ try { if (typeof toast === 'function') toast(msg); else console.log(msg); } catch { console.log(msg); } }
+  function save(){ try { if (typeof safePersistState === 'function') safePersistState(); else if (typeof saveState === 'function') saveState(); } catch(e){ console.warn('v0.3.8 save warning', e); } }
+
+  function modeText(use){ return (use && (use.fir || use.foundInRaid)) ? 'Found in Raid required' : 'Can buy / no FIR'; }
+  function modeBadge(use){ return (use && (use.fir || use.foundInRaid)) ? '<span class="badge cyan req-mode-badge">FIR required</span>' : '<span class="badge green req-mode-badge">Can buy / no FIR</span>'; }
+  function badgeForTotals(fir, buy){
+    const out = [];
+    if (num(fir) > 0) out.push(`<span class="badge cyan req-mode-badge">${esc(fir)} FIR required</span>`);
+    if (num(buy) > 0) out.push(`<span class="badge green req-mode-badge">${esc(buy)} can buy / no FIR</span>`);
+    return out.join(' ');
+  }
+  function trackedHave(itemName){
+    const q = key(itemName);
+    let total = 0;
+    arr(window.state?.items || state?.items).forEach(i => { if (key(i.name) === q) total += num(i.found,0); });
+    arr(window.state?.stash || state?.stash).forEach(i => { if (key(i.name) === q) total += num(i.qty,0); });
+    return total;
+  }
+  function fallbackUsageForTrackedItem(item){
+    const source = String(item?.source || '').toLowerCase();
+    const note = String(item?.note || '');
+    const needed = Math.max(0, num(item?.needed,0));
+    const fir = /\b(fir|found\s*in\s*raid)\b/i.test(note) && source !== 'hideout' ? needed : 0;
+    const buyable = source === 'hideout' ? needed : Math.max(0, needed - fir);
+    return { name:item?.name || '', still:Math.max(0, needed - num(item?.found,0)), total:needed, hideout:source === 'hideout' ? needed : 0, missions:source === 'quest' ? needed : 0, fir, buyable, have:num(item?.found,0), uses:[] };
+  }
+  function usageFor(name, item){
+    let u = null;
+    try { if (typeof window.lttItemUsage === 'function') u = window.lttItemUsage(name); } catch(e){ console.warn('usage lookup failed', e); }
+    const hasUse = u && (num(u.total)>0 || arr(u.uses).length || num(u.hideout)>0 || num(u.missions)>0 || num(u.fir)>0 || num(u.buyable)>0);
+    if (hasUse) return u;
+    return fallbackUsageForTrackedItem(item || {name});
+  }
+
+  function injectReqCss(){
+    if (document.getElementById('v038ReqCss')) return;
+    const css = document.createElement('style');
+    css.id = 'v038ReqCss';
+    css.textContent = `
+      .req-mode-line{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px;align-items:center}
+      .req-mode-badge{font-size:10px;letter-spacing:.12em;white-space:nowrap}
+      .req-mode-note{color:var(--text-dim);font-size:12px;margin-top:4px;display:block}
+      .req-mode-summary{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+      .req-use-list li{margin-bottom:8px}
+      .hideout-req .req-chip .req-mode-badge{margin-left:6px}
+      .hideout-mode{display:inline-flex;margin-left:8px;vertical-align:middle}
+    `;
+    document.head.appendChild(css);
+  }
+
+  function renderLookupPanel(searchText){
+    const list = $('itemList'); if (!list) return;
+    let panel = $('v038ItemUsePanel') || $('v037ItemUsePanel') || $('v035ItemUsePanel') || $('v20ItemUsePanel') || $('v15ItemUsePanel');
+    if (!panel) { panel = document.createElement('div'); panel.id = 'v038ItemUsePanel'; panel.className = 'panel readable'; list.parentNode.insertBefore(panel, list); }
+    panel.id = 'v038ItemUsePanel';
+    const q = String(searchText || '').trim();
+    if (!q) { panel.style.display='none'; panel.innerHTML=''; return; }
+    const u = usageFor(q);
+    const uses = arr(u.uses);
+    const useList = uses.slice(0, 40).map(use => {
+      const title = use.type === 'hideout'
+        ? `Hideout: ${use.station || 'Station'} level ${use.level || ''}`.trim()
+        : `Mission: ${use.mission || 'Task'}${use.trader ? ` / ${use.trader}` : ''}`;
+      return `<li><strong>${esc(use.qty)}×</strong> ${esc(title)} ${modeBadge(use)}<br><small class="meta">${esc(use.note || modeText(use))}</small></li>`;
+    }).join('');
+    panel.style.display = '';
+    panel.innerHTML = `
+      <h2>Item use lookup: ${esc(u.name || q)}</h2>
+      <p>Requirement type is now shown clearly. <strong>Hideout upgrades are marked Can buy / no FIR by default</strong>; only mission/objective lines that explicitly require Found in Raid are marked FIR.</p>
+      <div class="stats">
+        <div class="stat"><strong>${esc(u.still || 0)}</strong><span>Still need</span></div>
+        <div class="stat"><strong>${esc(u.total || 0)}</strong><span>Total remaining</span></div>
+        <div class="stat"><strong>${esc(u.fir || 0)}</strong><span>FIR required</span></div>
+        <div class="stat"><strong>${esc(u.buyable || 0)}</strong><span>Can buy / no FIR</span></div>
+        <div class="stat"><strong>${esc(u.hideout || 0)}</strong><span>Hideout left</span></div>
+        <div class="stat"><strong>${esc(u.missions || 0)}</strong><span>Missions left</span></div>
+        <div class="stat"><strong>${esc(trackedHave(u.name || q))}</strong><span>Stash/tracker says have</span></div>
+      </div>
+      <div class="req-mode-summary">${badgeForTotals(u.fir || 0, u.buyable || 0) || '<span class="badge">No synced requirement type found</span>'}</div>
+      ${uses.length ? `<h3>Where this is still used</h3><ul class="req-use-list">${useList}</ul>${uses.length > 40 ? `<p class="meta">+ ${uses.length - 40} more uses.</p>` : ''}` : `<p>No synced hideout/task usage found for <strong>${esc(q)}</strong>. Try the full item name or run Sync Data.</p>`}
+    `;
+  }
+
+  const oldRenderItems = (typeof renderItems === 'function') ? renderItems : null;
+  window.renderItems = renderItems = function renderItemsV038(){
+    injectReqCss();
+    const search = String($('searchInput')?.value || '').trim().toLowerCase();
+    const filter = $('filterSelect')?.value || 'all';
+    const list = $('itemList');
+    const template = $('itemTemplate');
+    if (!list || !template) return oldRenderItems && oldRenderItems();
+    renderLookupPanel(search);
+    const filtered = arr(state.items).filter(item => {
+      const text = `${item?.name || ''} ${item?.source || ''} ${item?.note || ''}`.toLowerCase();
+      const matchesSearch = !search || text.includes(search);
+      const isTracked = arr(state.tracked).includes(item.id);
+      const unfinished = num(item?.found,0) < num(item?.needed,0);
+      const matchesFilter = filter === 'all' || (filter === 'tracked' && isTracked) || (filter === 'unfinished' && unfinished) || item?.source === filter;
+      return matchesSearch && matchesFilter;
+    });
+    list.innerHTML = '';
+    if (!filtered.length) {
+      list.innerHTML = `<div class="panel"><p>Needed Items is manual only. Search in <strong>All Items Lookup</strong> and press Track needed, or add an item from Custom Track.</p></div>`;
+      return;
+    }
+    filtered.slice(0, search ? 80 : 160).forEach(item => {
+      const clone = template.content.cloneNode(true);
+      const isTracked = arr(state.tracked).includes(item.id);
+      const progress = (typeof itemProgress === 'function') ? itemProgress(item) : num(item.found,0);
+      const percent = item.needed ? (progress / item.needed) * 100 : 0;
+      const u = usageFor(item.name, item);
+      const fir = num(u.fir,0);
+      const buy = num(u.buyable,0) || (String(item.source).toLowerCase()==='hideout' ? num(item.needed,0) : 0);
+      clone.querySelector('.name').textContent = item.name;
+      const meta = clone.querySelector('.meta');
+      if (meta) {
+        const note = esc(item.note || 'No note');
+        const badges = badgeForTotals(fir, buy);
+        meta.innerHTML = `${note}<div class="req-mode-line">${badges || modeBadge({fir:false})}</div><small class="req-mode-note">Requirement type: ${fir ? 'some copies must be found in raid' : 'can be bought / normal unless a mission says FIR'}</small>`;
+      }
+      clone.querySelector('.pill').textContent = item.source || 'custom';
+      clone.querySelector('.progress-text').textContent = `${progress} / ${item.needed} collected`;
+      clone.querySelector('.bar span').style.width = `${Math.min(100, percent)}%`;
+      const trackBtn = clone.querySelector('.trackBtn');
+      trackBtn.textContent = isTracked ? 'Untrack' : 'Track';
+      trackBtn.onclick = () => toggleTrack(item.id);
+      clone.querySelector('.minusBtn').onclick = () => adjustFound(item.id, -1);
+      clone.querySelector('.plusBtn').onclick = () => adjustFound(item.id, 1);
+      const foundBtn = clone.querySelector('.foundBtn');
+      if (foundBtn) foundBtn.textContent = 'Found in raid';
+      clone.querySelector('.foundBtn').onclick = () => addRaidFound(item.id);
+      clone.querySelector('.deleteBtn').onclick = () => deleteItem(item.id);
+      list.appendChild(clone);
+    });
+  };
+
+  // Make newly tracked hideout items carry an explicit no-FIR note.
+  const oldTrackHideoutStation = window.trackHideoutStation;
+  window.trackHideoutStation = function trackHideoutStationV038(id){
+    const station = (typeof getHideoutStations === 'function') ? getHideoutStations().find(s => hideoutStationId(s) === id) : null;
+    const next = station && hideoutNextLevel(station);
+    if (!station || !next) return oldTrackHideoutStation ? oldTrackHideoutStation(id) : null;
+    hideoutReqItems(next).forEach(i => addTrackerItem(i.name, i.count, 'hideout', `${station.name} level ${next.level} • Can buy / no FIR`));
+    save(); notify('Hideout items added to tracker as Can buy / no FIR.');
+  };
+
+  const oldImportHideoutNeeds = window.importHideoutNeeds || (typeof importHideoutNeeds === 'function' ? importHideoutNeeds : null);
+  window.importHideoutNeeds = importHideoutNeeds = function importHideoutNeedsV038(){
+    let added = 0;
+    if (typeof getHideoutStations !== 'function') return oldImportHideoutNeeds && oldImportHideoutNeeds();
+    getHideoutStations().forEach(s => {
+      const next = hideoutNextLevel(s); if (!next) return;
+      hideoutReqItems(next).forEach(i => { addTrackerItem(i.name, i.count, 'hideout', `${s.name} level ${next.level} • Can buy / no FIR`); added++; });
+    });
+    save(); notify(`Imported ${added} next-upgrade hideout requirements as Can buy / no FIR.`);
+  };
+
+  // Re-render hideout cards so each requirement line says Can buy / no FIR or FIR required.
+  const oldRenderHideoutCard = (typeof renderHideoutCard === 'function') ? renderHideoutCard : null;
+  window.renderHideoutCard = renderHideoutCard = function renderHideoutCardV038(station){
+    if (!station || typeof hideoutStationId !== 'function') return oldRenderHideoutCard ? oldRenderHideoutCard(station) : '';
+    const id = hideoutStationId(station);
+    const cur = hideoutCurrentLevel(station);
+    const max = hideoutMaxLevel(station);
+    const next = hideoutNextLevel(station);
+    const items = hideoutReqItems(next);
+    const prereq = [...hideoutReqStations(next), ...hideoutReqSkills(next), ...hideoutReqTraders(next)];
+    const cls = cur >= max ? 'maxed-card' : prereq.length ? 'locked-card' : '';
+    const options = [`<option value="0">Not built</option>`, ...hideoutLevels(station).map(l => `<option value="${esc(l.level)}" ${Number(l.level)===cur?'selected':''}>Level ${esc(l.level)}</option>`)].join('');
+    return `<article class="hideout-card ${cls}">
+      <div class="hideout-head"><div class="hideout-icon">${cur >= max ? '★' : '✣'}</div><div><h3>${esc(station.name)}</h3><p>Current level ${esc(cur)} / ${esc(max)}</p></div><div class="hideout-controls"><select onchange="setHideoutLevel('${esc(id)}', this.value)">${options}</select></div></div>
+      <div class="hideout-req"><h4>${next ? `Requirements for level ${esc(next.level)}` : 'Maxed'}</h4>
+        ${next ? `<ul>${items.map(i => { const have=trackedHave(i.name); const left=Math.max(0,num(i.count)-have); return `<li><strong>${esc(i.count)}</strong> ${esc(i.name)} <span class="hideout-mode">${modeBadge({fir:!!i.foundInRaid})}</span><br><small class="meta">have ${esc(have)} • left ${esc(left)} • ${modeText({fir:!!i.foundInRaid})}</small></li>`; }).join('') || '<li>No item requirements cached.</li>'}</ul>${prereq.length ? `<div class="req-list">${prereq.map(r => `<span class="req-chip">Requires ${esc(r)}</span>`).join('')}</div>` : ''}` : '<p class="meta">This station is marked maxed.</p>'}
+      </div>
+      <div class="hideout-foot">${next && items.length ? `<button class="small success" onclick="trackHideoutStation('${esc(id)}')">Track next items</button>` : ''}<button class="small ghost" onclick="setHideoutLevel('${esc(id)}', ${Math.max(0,cur-1)})">- level</button><button class="small" onclick="setHideoutLevel('${esc(id)}', ${Math.min(max,cur+1)})">+ level</button></div>
+    </article>`;
+  };
+
+  function applyVersion038(){
+    injectReqCss();
+    const build = document.querySelector('.sidebar-foot .foot-row:last-child b'); if (build) build.textContent = BUILD038;
+    const subtitle = document.querySelector('.topbar-sub'); if (subtitle) subtitle.textContent = `Offline raid, stash, scanner, market & locker tracker // ${BUILD038}`;
+    document.querySelectorAll('.topbar-sub,.sidebar-foot b,.footer-credit,.bottom-credit,.statusbar-center').forEach(el => { if (el && el.innerHTML) el.innerHTML = el.innerHTML.replace(/v0\.3\.\d+/g, BUILD038); });
+  }
+  document.addEventListener('DOMContentLoaded', () => setTimeout(() => { try { applyVersion038(); if (typeof render === 'function') render(); } catch(e){ console.warn('v0.3.8 init warning', e); } }, 200));
+  try { applyVersion038(); console.info(`${BUILD038} loaded: FIR vs buyable/no-FIR labels are visible on Needed Items and Hideout.`); } catch(e){ console.warn('v0.3.8 init warning', e); }
+})();
+
+/* ===== v0.3.9 FIR display correction =====
+   Fixes the v0.3.8 display being too generic. Hideout requirements are still correctly
+   normal/buyable by default, but task requirements that explicitly require Found in Raid
+   are now separated and shown as task FIR counts instead of everything looking like one
+   "Can buy / no FIR" status. */
+(function(){
+  'use strict';
+  const BUILD = 'v0.3.9';
+  const $ = id => document.getElementById(id);
+  const arr = v => Array.isArray(v) ? v : [];
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const num = (v, d=0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  const norm = v => String(v || '').toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+  const key = v => norm(v).replace(/\s+/g,'');
+  let cacheKey = '';
+  let cacheIndex = null;
+
+  function ensure(){
+    try { if (typeof ensureStateShape === 'function') ensureStateShape(); } catch {}
+    window.state = window.state || {};
+    state.items = arr(state.items);
+    state.stash = arr(state.stash);
+    state.apiCache = state.apiCache || {};
+    state.tracked = arr(state.tracked);
+    state.hideoutProgress = state.hideoutProgress || {};
+    state.missionProgress = state.missionProgress || {};
+    state.taskObjectives = state.taskObjectives || {};
+    state.appPrefs = state.appPrefs || {};
+  }
+  function save(){ try { if (typeof safePersistState === 'function') safePersistState(); else if (typeof saveState === 'function') saveState(); } catch(e){ console.warn('v0.3.9 save warning', e); } }
+  function notify(msg){ try { if (typeof toast === 'function') toast(msg); else console.log(msg); } catch { console.log(msg); } }
+
+  function taskDone(task){
+    const v = state.missionProgress?.[task?.id] ?? state.missionProgress?.[task?.name];
+    return ['done','complete','completed','true'].includes(String(v || '').toLowerCase());
+  }
+  function objDone(task, obj, idx){
+    try {
+      if (typeof objectiveKey === 'function') {
+        if (state.taskObjectives?.[objectiveKey(task.id, obj.id || String(idx))]) return true;
+        if (obj.id && state.taskObjectives?.[objectiveKey(task.id, obj.id)]) return true;
+      }
+    } catch {}
+    return !!state.taskObjectives?.[`${task?.id}::${obj?.id || idx}`];
+  }
+  function stationId(st){
+    try { if (typeof hideoutStationId === 'function') return hideoutStationId(st); } catch {}
+    return st?.id || st?.normalizedName || key(st?.name);
+  }
+  function hideoutLevel(st){
+    const candidates = [stationId(st), st?.id, st?.normalizedName, st?.name, key(st?.name)].filter(Boolean);
+    for (const c of candidates) if (Object.prototype.hasOwnProperty.call(state.hideoutProgress || {}, c)) return num(state.hideoutProgress[c], 0);
+    return 0;
+  }
+  function hLevels(st){
+    try { if (typeof hideoutLevels === 'function') return hideoutLevels(st); } catch {}
+    return arr(st?.levels).slice().sort((a,b)=>num(a.level)-num(b.level));
+  }
+  function hMax(st){
+    try { if (typeof hideoutMaxLevel === 'function') return hideoutMaxLevel(st); } catch {}
+    return hLevels(st).reduce((m,l)=>Math.max(m,num(l.level)),0);
+  }
+  function hReqStations(level){ try { if (typeof hideoutReqStations === 'function') return hideoutReqStations(level); } catch {} return arr(level?.stationLevelRequirements).map(r => `${r?.station?.name || r?.name || 'Station'} level ${r?.level || ''}`.trim()); }
+  function hReqSkills(level){ try { if (typeof hideoutReqSkills === 'function') return hideoutReqSkills(level); } catch {} return []; }
+  function hReqTraders(level){ try { if (typeof hideoutReqTraders === 'function') return hideoutReqTraders(level); } catch {} return []; }
+  function hNext(st){
+    const cur = hideoutLevel(st);
+    return hLevels(st).find(l => num(l.level) > cur) || null;
+  }
+  function getHideout(){
+    try { if (typeof getHideoutStations === 'function') return getHideoutStations(); } catch {}
+    return arr(state.apiCache?.hideout);
+  }
+
+  function reqExplicitFir(req){
+    if (!req) return false;
+    if (req.foundInRaid === true || req.fir === true || req.requiresFoundInRaid === true || req.requireFoundInRaid === true) return true;
+    const attrs = arr(req.attributes).map(a => `${a?.name || ''} ${a?.value ?? ''}`).join(' ').toLowerCase();
+    if (/found\s*in\s*raid|foundinraid|\bfir\b/.test(attrs) && !/(false|no|0)\b/.test(attrs)) return true;
+    return false;
+  }
+  function hReqItems(level){
+    const src = arr(level?.itemRequirements);
+    return src.map(r => ({
+      id:r?.item?.id || r?.id,
+      name:r?.item?.name || r?.name || r?.itemName,
+      shortName:r?.item?.shortName || r?.shortName,
+      wikiLink:r?.item?.wikiLink,
+      iconLink:r?.item?.iconLink,
+      count:Math.max(1, num(r?.count || r?.quantity, 1)),
+      foundInRaid:reqExplicitFir(r) // hideout defaults to normal/no FIR unless explicit
+    })).filter(i => i.name || i.shortName);
+  }
+
+  function isRealItem(item){
+    const name = String(item?.name || item?.shortName || '').trim();
+    if (!name || name.length < 2 || name.length > 90) return false;
+    if (/^(item|items|any item|any items|quest item|optional item|unknown item)$/i.test(name)) return false;
+    if (/^(first in line|building foundations|key partner|half[-\s]?empty|mission requirements)$/i.test(name)) return false;
+    const meta = `${item?.type || ''} ${arr(item?.types).join(' ')} ${item?.category || ''}`.toLowerCase();
+    if (meta.includes('questitem') || meta.includes('quest item')) return false;
+    return true;
+  }
+  function objectiveText(o){ return `${o?.description || ''} ${o?.type || ''}`.toLowerCase(); }
+  function objectiveExcluded(o){
+    if (!o || o.optional) return true;
+    const t = String(o.type || '').toLowerCase();
+    const d = objectiveText(o);
+    if (!t.includes('item')) return true;
+    if (/questitem|useitem|mark|builditem|hideout|playerlevel|skill|trader|shoot|extract|visit|taskstatus/.test(t)) return true;
+    if (o.questItem || o.markerItem || o.useAny || o.hideoutStation || o.containsCategory || arr(o.containsAll).length) return true;
+    // These are category/choice objectives. They should never make one item look required hundreds of times.
+    if (/sell\s+any\s+items?|any\s+items?\s+to|sell\s+items?\s+to|found\s+in\s+raid\s+(military\s+)?electronic\s+items?|found\s+in\s+raid\s+(medical|provisions|valuable|streamer|household|barter|rare|weapons?|weapon\s+parts?|armor|equipment|tools?|building\s+materials?)|hand\s+over\s+.*(military\s+)?electronic\s+items?|hand\s+over\s+.*(medical|provisions|valuable|streamer|barter|rare|weapons?|equipment)\s+items?|from\s+category|category\s+items?|one\s+of\s+the|any\s+of\s+the|any\s+weapon|any\s+armor|any\s+equipment/.test(d)) return true;
+    return false;
+  }
+  function itemMentioned(o, item){
+    const d = objectiveText(o);
+    if (!d) return true;
+    const names = [item?.name, item?.shortName, item?.normalizedName].filter(Boolean).map(norm).filter(n => n.length >= 2);
+    return names.some(n => d.includes(n) || d.includes(`${n}s`) || (n.endsWith('s') && d.includes(n.slice(0,-1))));
+  }
+  function objectiveNeedsFir(o){
+    const d = objectiveText(o);
+    return !!(o?.foundInRaid || /found\s*in\s*raid|find\s+.*\s+in\s+raid|find\s+.*\s+while\s+in\s+raid|\bfir\b/.test(d));
+  }
+  function objectiveItems(o){
+    if (objectiveExcluded(o)) return [];
+    const raw = [];
+    arr(o.items).forEach(i => raw.push(i));
+    if (o.item) raw.push(o.item);
+    const real = raw.filter(isRealItem);
+    if (!real.length) return [];
+    const explicit = real.filter(i => itemMentioned(o, i));
+    if (real.length > 1 && !explicit.length) return [];
+    return (explicit.length ? explicit : real).map(i => ({
+      ...i,
+      name:i.name || i.shortName,
+      count:Math.max(1, num(i.count || o.count, 1)),
+      foundInRaid:!!(i.foundInRaid || objectiveNeedsFir(o))
+    }));
+  }
+
+  function have(itemName){
+    const q = key(itemName);
+    let total = 0;
+    arr(state.items).forEach(i => { if (key(i.name) === q) total += num(i.found,0); });
+    arr(state.stash).forEach(i => { if (key(i.name) === q) total += num(i.qty,0); });
+    return total;
+  }
+  function addUse(index, name, qty, use){
+    if (!name) return;
+    const k = key(name); if (!k) return;
+    const n = Math.max(1, num(qty, 1));
+    const entry = index.get(k) || { key:k, name, hideout:0, missions:0, fir:0, normal:0, uses:[] };
+    if (use.type === 'hideout') entry.hideout += n;
+    if (use.type === 'mission') entry.missions += n;
+    if (use.fir) entry.fir += n; else entry.normal += n;
+    entry.uses.push({ ...use, qty:n, mode: use.fir ? 'FIR required' : (use.type === 'hideout' ? 'Hideout: can buy / no FIR' : 'Normal / no FIR') });
+    index.set(k, entry);
+  }
+  function buildKey(){
+    return JSON.stringify({
+      sync:state.apiCache?.syncedAt || '',
+      h:arr(state.apiCache?.hideout).length,
+      t:arr(state.apiCache?.tasks).length,
+      hp:state.hideoutProgress || {},
+      mp:state.missionProgress || {},
+      to:state.taskObjectives || {},
+      have:arr(state.items).map(i => [key(i.name), num(i.found,0)]).concat(arr(state.stash).map(i => [key(i.name), num(i.qty,0)]))
+    });
+  }
+  function buildIndex(){
+    ensure();
+    const ck = buildKey();
+    if (cacheIndex && cacheKey === ck) return cacheIndex;
+    const index = new Map();
+
+    getHideout().forEach(st => {
+      const cur = hideoutLevel(st);
+      hLevels(st).forEach(level => {
+        const lvl = num(level?.level,0);
+        if (!lvl || lvl <= cur) return;
+        hReqItems(level).forEach(req => addUse(index, req.name || req.shortName, req.count, {
+          type:'hideout', station:st?.name || 'Hideout station', level:lvl, fir:!!req.foundInRaid,
+          note:req.foundInRaid ? 'Hideout requirement is explicitly marked Found in Raid.' : 'Hideout requirement: can be bought/obtained normally unless the wiki/API explicitly says Found in Raid.'
+        }));
+      });
+    });
+
+    arr(state.apiCache?.tasks).forEach(task => {
+      if (!task || taskDone(task)) return;
+      const perTask = new Map();
+      arr(task.objectives).forEach((o, idx) => {
+        if (objDone(task, o, idx)) return;
+        objectiveItems(o).forEach(item => {
+          const k = key(item.name || item.shortName); if (!k) return;
+          const old = perTask.get(k) || { name:item.name || item.shortName, count:0, fir:false, notes:[] };
+          old.count = Math.max(num(old.count,0), num(item.count || o.count,1));
+          old.fir = old.fir || !!item.foundInRaid;
+          const n = String(o.description || o.type || '').trim();
+          if (n && !old.notes.includes(n)) old.notes.push(n);
+          perTask.set(k, old);
+        });
+      });
+      perTask.forEach(item => addUse(index, item.name, item.count, {
+        type:'mission', mission:task.name || 'Mission/task', trader:task.trader?.name || '', fir:!!item.fir,
+        note:item.notes.slice(0,2).join(' / ') || (item.fir ? 'Mission requires Found in Raid.' : 'Mission hand-in does not say Found in Raid.')
+      }));
+    });
+
+    cacheKey = ck;
+    cacheIndex = index;
+    window.lttRequirementIndex = index;
+    return index;
+  }
+  function usage(name){
+    const q = key(name);
+    const index = buildIndex();
+    let e = index.get(q);
+    if (!e) {
+      const qn = norm(name);
+      for (const entry of index.values()) {
+        const en = norm(entry.name);
+        if (en === qn || (qn.length >= 4 && en.includes(qn)) || (en.length >= 4 && qn.includes(en))) { e = entry; break; }
+      }
+    }
+    const base = e || { key:q, name:name, hideout:0, missions:0, fir:0, normal:0, uses:[] };
+    const h = have(base.name || name);
+    const total = num(base.hideout) + num(base.missions);
+    return { ...base, buyable:num(base.normal), normal:num(base.normal), total, have:h, still:Math.max(0, total - h) };
+  }
+  window.lttItemUsage = usage;
+  window.v039ItemUsage = usage;
+
+  function injectCss(){
+    if ($('v039Css')) return;
+    const css = document.createElement('style');
+    css.id = 'v039Css';
+    css.textContent = `
+      .v039-breakdown{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+      .v039-help{display:block;margin-top:5px;color:var(--text-dim);font-size:12px;line-height:1.45}
+      .v039-use-list li{margin-bottom:9px}
+      .v039-normal{border-color:rgba(138,184,74,.32)!important;color:var(--olive-2)!important;background:rgba(138,184,74,.05)!important}
+      .v039-fir{border-color:rgba(127,184,201,.32)!important;color:var(--steel-2)!important;background:rgba(127,184,201,.05)!important}
+      .v039-empty{border-color:var(--line)!important;color:var(--text-dim)!important;background:rgba(255,255,255,.02)!important}
+    `;
+    document.head.appendChild(css);
+  }
+  function badge(cls, txt){ return `<span class="badge ${cls}">${esc(txt)}</span>`; }
+  function sourceBadges(u){
+    const out = [];
+    if (num(u.fir) > 0) out.push(badge('v039-fir', `${num(u.fir)} task FIR`));
+    if (num(u.normal) > 0) out.push(badge('v039-normal', `${num(u.normal)} normal / buyable`));
+    if (!out.length) out.push(badge('v039-empty', 'No synced requirement type'));
+    return out.join(' ');
+  }
+  function useBadge(use){ return use.fir ? badge('v039-fir', 'FIR required') : badge('v039-normal', use.type === 'hideout' ? 'Can buy / no FIR' : 'Normal / no FIR'); }
+
+  function renderLookupPanel(searchText){
+    const list = $('itemList'); if (!list) return;
+    let panel = $('v039ItemUsePanel') || $('v038ItemUsePanel') || $('v037ItemUsePanel') || $('v035ItemUsePanel');
+    if (!panel) { panel = document.createElement('div'); panel.id = 'v039ItemUsePanel'; panel.className = 'panel readable'; list.parentNode.insertBefore(panel, list); }
+    panel.id = 'v039ItemUsePanel';
+    const q = String(searchText || '').trim();
+    if (!q) { panel.style.display = 'none'; panel.innerHTML = ''; return; }
+    const u = usage(q);
+    const uses = arr(u.uses);
+    panel.style.display = '';
+    panel.innerHTML = `<h2>Item use lookup: ${esc(u.name || q)}</h2>
+      <p>This now separates <strong>task FIR requirements</strong> from <strong>normal / buyable requirements</strong>. Hideout upgrade materials are treated as normal/no-FIR unless the requirement explicitly says Found in Raid.</p>
+      <div class="stats">
+        <div class="stat"><strong>${esc(u.still || 0)}</strong><span>Still need</span></div>
+        <div class="stat"><strong>${esc(u.fir || 0)}</strong><span>Task FIR required</span></div>
+        <div class="stat"><strong>${esc(u.normal || 0)}</strong><span>Normal / buyable</span></div>
+        <div class="stat"><strong>${esc(u.hideout || 0)}</strong><span>Hideout left</span></div>
+        <div class="stat"><strong>${esc(u.missions || 0)}</strong><span>Tasks left</span></div>
+        <div class="stat"><strong>${esc(u.have || 0)}</strong><span>Stash/tracker says have</span></div>
+      </div>
+      <div class="v039-breakdown">${sourceBadges(u)}</div>
+      ${uses.length ? `<h3>Where this is still used</h3><ul class="v039-use-list">${uses.slice(0,50).map(use => { const title = use.type === 'hideout' ? `Hideout: ${use.station || 'Station'} level ${use.level || ''}` : `Task: ${use.mission || 'Mission'}${use.trader ? ` / ${use.trader}` : ''}`; return `<li><strong>${esc(use.qty)}×</strong> ${esc(title)} ${useBadge(use)}<br><small class="meta">${esc(use.note || use.mode || '')}</small></li>`; }).join('')}</ul>${uses.length > 50 ? `<p class="meta">+ ${uses.length - 50} more uses.</p>` : ''}` : `<p>No synced hideout/task usage found for <strong>${esc(q)}</strong>. Try the full item name or run Sync Data.</p>`}`;
+  }
+
+  const oldRenderItems = (typeof renderItems === 'function') ? renderItems : null;
+  window.renderItems = renderItems = function renderItemsV039(){
+    injectCss();
+    const list = $('itemList');
+    const template = $('itemTemplate');
+    if (!list || !template) return oldRenderItems ? oldRenderItems() : null;
+    const search = String($('searchInput')?.value || '').trim().toLowerCase();
+    const filter = $('filterSelect')?.value || 'all';
+    renderLookupPanel(search);
+    const filtered = arr(state.items).filter(item => {
+      const text = `${item?.name || ''} ${item?.source || ''} ${item?.note || ''}`.toLowerCase();
+      const matchesSearch = !search || text.includes(search);
+      const isTracked = arr(state.tracked).includes(item.id);
+      const unfinished = num(item?.found,0) < num(item?.needed,0);
+      const matchesFilter = filter === 'all' || (filter === 'tracked' && isTracked) || (filter === 'unfinished' && unfinished) || item?.source === filter;
+      return matchesSearch && matchesFilter;
+    });
+    list.innerHTML = '';
+    if (!filtered.length) {
+      list.innerHTML = `<div class="panel"><p>Needed Items is manual only. Track items from All Items Lookup, Hideout, Missions, Raid Bag, or Custom Track.</p></div>`;
+      return;
+    }
+    filtered.slice(0, search ? 80 : 160).forEach(item => {
+      const clone = template.content.cloneNode(true);
+      const progress = (typeof itemProgress === 'function') ? itemProgress(item) : num(item.found,0);
+      const percent = item.needed ? (progress / item.needed) * 100 : 0;
+      const u = usage(item.name);
+      const fallbackFir = /\b(fir|found\s*in\s*raid)\b/i.test(String(item.note || '')) && String(item.source || '').toLowerCase() !== 'hideout';
+      const displayU = (u.total || arr(u.uses).length) ? u : { ...u, fir:fallbackFir ? num(item.needed,0) : 0, normal:fallbackFir ? 0 : num(item.needed,0), buyable:fallbackFir ? 0 : num(item.needed,0) };
+      const nameEl = clone.querySelector('.name'); if (nameEl) nameEl.textContent = item.name;
+      const meta = clone.querySelector('.meta');
+      if (meta) {
+        const src = String(item.source || '').toLowerCase();
+        const help = displayU.fir > 0
+          ? 'Some of this item is required Found in Raid for tasks. Normal/hideout copies can be bought or obtained normally.'
+          : (src === 'hideout' ? 'Hideout requirement: can buy from flea/trader or obtain normally. No FIR needed unless explicitly marked.' : 'No synced FIR requirement found for this tracked entry.');
+        meta.innerHTML = `${esc(item.note || 'No note')}<div class="v039-breakdown">${sourceBadges(displayU)}</div><span class="v039-help">${esc(help)}</span>`;
+      }
+      const pill = clone.querySelector('.pill'); if (pill) pill.textContent = item.source || 'custom';
+      const ptxt = clone.querySelector('.progress-text'); if (ptxt) ptxt.textContent = `${progress} / ${item.needed} collected`;
+      const bar = clone.querySelector('.bar span'); if (bar) bar.style.width = `${Math.min(100, percent)}%`;
+      const trackBtn = clone.querySelector('.trackBtn'); if (trackBtn) { trackBtn.textContent = arr(state.tracked).includes(item.id) ? 'Untrack' : 'Track'; trackBtn.onclick = () => toggleTrack(item.id); }
+      const minus = clone.querySelector('.minusBtn'); if (minus) minus.onclick = () => adjustFound(item.id, -1);
+      const plus = clone.querySelector('.plusBtn'); if (plus) plus.onclick = () => adjustFound(item.id, 1);
+      const found = clone.querySelector('.foundBtn'); if (found) { found.textContent = 'Found in raid'; found.onclick = () => addRaidFound(item.id); }
+      const del = clone.querySelector('.deleteBtn'); if (del) del.onclick = () => deleteItem(item.id);
+      list.appendChild(clone);
+    });
+  };
+
+  // Track-needed now stores a readable FIR/normal split in the note.
+  window.v16TrackStillNeeded = function(name){
+    ensure();
+    const itemName = String(name || '').trim(); if (!itemName) return;
+    const u = usage(itemName);
+    const qty = Math.max(1, u.still || u.total || 1);
+    const source = u.hideout && !u.missions ? 'hideout' : (u.missions && !u.hideout ? 'quest' : 'custom');
+    const note = u.total ? `Lookup total: ${u.hideout || 0} hideout + ${u.missions || 0} tasks remaining • ${u.fir || 0} FIR / ${u.normal || 0} normal` : 'Added from All Items Lookup';
+    const existing = state.items.find(i => key(i.name) === key(itemName) && String(i.note || '').startsWith('Lookup total'));
+    if (existing) { existing.needed = Math.max(num(existing.needed, 1), qty); existing.source = source; existing.note = note; if (!state.tracked.includes(existing.id)) state.tracked.push(existing.id); }
+    else { const it = { id:crypto.randomUUID(), name:itemName, needed:qty, found:0, source, note }; state.items.push(it); state.tracked.push(it.id); }
+    save(); notify(`Tracking ${qty} × ${itemName}.`); try { render(); } catch {}
+  };
+  window.v16TrackStillNeededEncoded = function(encoded){ window.v16TrackStillNeeded(decodeURIComponent(encoded || '')); };
+
+  const oldRenderHideoutCard = (typeof renderHideoutCard === 'function') ? renderHideoutCard : null;
+  window.renderHideoutCard = renderHideoutCard = function renderHideoutCardV039(station){
+    if (!station) return oldRenderHideoutCard ? oldRenderHideoutCard(station) : '';
+    const id = stationId(station);
+    const cur = hideoutLevel(station);
+    const max = hMax(station);
+    const next = hNext(station);
+    const items = hReqItems(next);
+    const prereq = [...hReqStations(next), ...hReqSkills(next), ...hReqTraders(next)];
+    const cls = cur >= max ? 'maxed-card' : prereq.length ? 'locked-card' : '';
+    const options = [`<option value="0">Not built</option>`, ...hLevels(station).map(l => `<option value="${esc(l.level)}" ${num(l.level)===cur?'selected':''}>Level ${esc(l.level)}</option>`)].join('');
+    return `<article class="hideout-card ${cls}">
+      <div class="hideout-head"><div class="hideout-icon">${cur >= max ? '★' : '✣'}</div><div><h3>${esc(station.name)}</h3><p>Current level ${esc(cur)} / ${esc(max)}</p></div><div class="hideout-controls"><select onchange="setHideoutLevel('${esc(id)}', this.value)">${options}</select></div></div>
+      <div class="hideout-req"><h4>${next ? `Requirements for level ${esc(next.level)}` : 'Maxed'}</h4>
+        ${next ? `<ul>${items.map(i => { const owned=have(i.name); const left=Math.max(0,num(i.count)-owned); return `<li><strong>${esc(i.count)}</strong> ${esc(i.name)} ${i.foundInRaid ? badge('v039-fir','FIR required') : badge('v039-normal','Can buy / no FIR')}<br><small class="meta">have ${esc(owned)} • left ${esc(left)} • ${i.foundInRaid ? 'This requirement is explicitly marked Found in Raid.' : 'Hideout item: can be bought from flea/trader or found normally.'}</small></li>`; }).join('') || '<li>No item requirements cached.</li>'}</ul>${prereq.length ? `<div class="req-list">${prereq.map(r => `<span class="req-chip">Requires ${esc(r)}</span>`).join('')}</div>` : ''}` : '<p class="meta">This station is marked maxed.</p>'}
+      </div>
+      <div class="hideout-foot">${next && items.length ? `<button class="small success" onclick="trackHideoutStation('${esc(id)}')">Track next items</button>` : ''}<button class="small ghost" onclick="setHideoutLevel('${esc(id)}', ${Math.max(0,cur-1)})">- level</button><button class="small" onclick="setHideoutLevel('${esc(id)}', ${Math.min(max,cur+1)})">+ level</button></div>
+    </article>`;
+  };
+
+  function applyVersion(){
+    injectCss();
+    const build = document.querySelector('.sidebar-foot .foot-row:last-child b'); if (build) build.textContent = BUILD;
+    const subtitle = document.querySelector('.topbar-sub'); if (subtitle) subtitle.textContent = `Offline raid, stash, scanner, market & locker tracker // ${BUILD}`;
+    document.querySelectorAll('.topbar-sub,.sidebar-foot b,.footer-credit,.bottom-credit,.statusbar-center').forEach(el => { if (el && el.innerHTML) el.innerHTML = el.innerHTML.replace(/v0\.3\.\d+/g, BUILD); });
+  }
+
+  document.addEventListener('DOMContentLoaded', () => setTimeout(() => { try { ensure(); applyVersion(); if (typeof render === 'function') render(); } catch(e){ console.warn('v0.3.9 init warning', e); } }, 200));
+  try { ensure(); applyVersion(); console.info(`${BUILD} loaded: task FIR and hideout no-FIR are now separated more clearly.`); } catch(e){ console.warn('v0.3.9 init warning', e); }
 })();

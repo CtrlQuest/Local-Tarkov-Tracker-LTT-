@@ -4,7 +4,13 @@ Local Tarkov Tracker is an unofficial, local-first Escape from Tarkov tracking t
 
 Repo / updates: https://github.com/CtrlQuest/Local-Tarkov-Tracker-LTT-
 
-Current build naming: **v0.3.4**. Older internal test builds used names like v33/v34; public releases now use semantic-style version numbers.
+Current build naming: **v0.3.9**. Older internal test builds used names like v33/v34; public releases now use semantic-style version numbers.
+
+## v0.3.9 - Bottom bar cleanup
+
+- Removed the UTC clock from the bottom status bar.
+- Kept the rest of the UI and storage behaviour unchanged.
+
 
 The app is designed to run in your browser from your own PC. Personal progress is saved locally in your browser. Synced reference data is cached locally using IndexedDB where supported.
 
@@ -135,7 +141,7 @@ The app code in this repository is released under the MIT License. See `LICENSE`
 Escape from Tarkov and related names/assets belong to Battlestate Games. This is an unofficial fan tool and is not affiliated with Battlestate Games, TarkovTracker, tarkov.dev, Fandom, or Reddit.
 
 
-## v0.2.6 changes
+## v26 changes
 
 - Flea Prices is now the second sidebar tab.
 - The duplicate Keys tab was removed; key ownership, needed/missing status, lock locations and wiki sync now live under **Keys / Locker**.
@@ -144,7 +150,7 @@ Escape from Tarkov and related names/assets belong to Battlestate Games. This is
 - The real item catalogue is pulled from tarkov.dev GraphQL data and cached locally in IndexedDB.
 
 
-### v0.2.7 note
+### v27 note
 
 The duplicate old **Keys** tab was removed from normal navigation in v26. In v27, the wiki key sync controls have been moved into the kept **Keys / Locker** page:
 
@@ -176,7 +182,7 @@ Duct tape x3
 The scanner matches those labels against the synced Tarkov item catalogue using short names and full names, then shows a review table before anything is imported into Stash. Durability-style values such as `5/5` are treated as item condition, not quantity. Quantity formats such as `x3`, `3x`, or `Duct tape x3` are parsed where possible.
 
 
-## v0.3.4 scanner changes
+## v0.3.9 scanner changes
 
 The Stash Scanner now uses a multi-pass OCR mode by default. It scans the raw image and a contrast-enhanced image, then merges the label matches. This should catch more Tarkov labels such as `TANGO6T`, `PM II 1-8`, `STM 15"`, `MPX GEN1`, `SAG MK1`, and `Razor`.
 
@@ -192,3 +198,40 @@ Zvezda 5/5
 Magnum x20
 Magnum x10
 ```
+
+
+## v0.3.9 - FIR vs buyable requirements
+
+Needed Items now shows whether remaining uses require **Found in Raid** or can be **bought/found normally**. The item-use lookup is progress-aware, so built hideout levels and completed mission objectives are ignored.
+
+Use **Sync Data** after updating so the app can refresh task data and hideout requirement flags where the public API provides them.
+
+
+## v0.3.9 - FIR / buyable hideout requirement fix
+
+- Hideout upgrade items now default to **Can buy / no FIR** unless the synced requirement explicitly says Found in Raid.
+- Needed Items now shows clearer requirement badges for **FIR required** versus **can buy / normal**.
+- Hideout cards now show the requirement mode on each item line, plus have/left counts.
+- Item lookup now explains that built hideout levels and completed task objectives are ignored.
+- Example: Xenomorph sealing foam for Lavatory level 3 should show as a normal/buyable hideout requirement, not FIR, unless the data explicitly marks it as FIR.
+
+
+## v0.3.9 - Visible FIR / buyable labels
+
+- Needed Items cards now clearly show requirement type badges:
+  - **FIR required**
+  - **Can buy / no FIR**
+- Hideout requirement rows now label every item as **Can buy / no FIR** unless the requirement explicitly says Found in Raid.
+- Item use lookup now has separate stat boxes for FIR required and Can buy / no FIR.
+- Hideout imports now add `Can buy / no FIR` into the tracker note so the status is visible even before searching.
+
+After updating, press **Ctrl + F5** and run **Sync Data** once if requirement data looks old.
+
+
+## v0.3.9 - FIR display correction
+
+- Fixed the Needed Items display so it no longer looks like every requirement is simply **Can buy / no FIR**.
+- Hideout materials still show **Can buy / no FIR** by default, which is correct unless the requirement explicitly says Found in Raid.
+- Task/mission requirements now show a separate **Task FIR** count when the synced objective says the item must be found in raid.
+- Item lookup now separates **Task FIR**, **Normal / buyable**, **Hideout left**, and **Tasks left** more clearly.
+- Tracking an item from lookup now stores the FIR/normal split in the tracked note.
